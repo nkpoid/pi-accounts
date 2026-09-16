@@ -5,10 +5,10 @@ Pi の同一セッション内で Codex アカウントを切り替える拡張�
 
 ## インストールと設定
 
-ローカル checkout を登録する。
+GitHub リポジトリからインストールする。
 
 ```bash
-pi install /absolute/path/to/pi-accounts
+pi install https://github.com/nkpoid/pi-accounts
 ```
 
 `getAgentDir()` 配下の `accounts.json` に、設定内で一意の `id` と `provider` を指定する。
