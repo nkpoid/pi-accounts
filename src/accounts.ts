@@ -17,6 +17,10 @@ export async function readAccounts(path: string): Promise<Account[]> {
     // Do not echo JSON parse errors: a misplaced credential could be in the input.
     throw new Error(`pi-accounts: ${path} は有効な JSON ではありません。`);
   }
+  return validateAccounts(data, path);
+}
+
+function validateAccounts(data: unknown, path: string): Account[] {
   if (!Array.isArray(data)) throw new Error(`pi-accounts: ${path} は配列で指定してください。`);
   const ids = new Set<string>();
   return data.map((entry: unknown, index) => {
