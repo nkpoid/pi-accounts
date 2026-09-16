@@ -2,11 +2,13 @@ import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readAccounts, updateAccounts, type Account } from "./accounts.ts";
 import { accountProviderId, createCodexAccountProvider } from "./codex.ts";
+import { registerLoginDefault } from "./login.ts";
 
 export default async function (pi: ExtensionAPI) {
   const path = join(getAgentDir(), "accounts.json");
   let accounts = await readAccounts(path);
   for (const account of accounts) pi.registerProvider(createCodexAccountProvider(account.id));
+  registerLoginDefault(pi, (provider) => accounts.some((account) => accountProviderId(account.id) === provider));
 
   function syncAccounts(next: Account[]) {
     for (const account of accounts) {
@@ -20,7 +22,7 @@ export default async function (pi: ExtensionAPI) {
 
   function promptLogin(ctx: ExtensionContext, provider: string) {
     const command = `/login ${provider}`;
-    ctx.ui.notify(`${command} でログイン後、/account で切り替えてください。`, "info");
+    ctx.ui.notify(`${command} でログインすると、新規セッションのデフォルトになります。現在の会話の切り替えは /account で行ってください。`, "info");
     if (ctx.mode === "tui" && !ctx.ui.getEditorText()) ctx.ui.setEditorText(command);
   }
 
