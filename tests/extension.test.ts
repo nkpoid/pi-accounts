@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import {
-  createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
+  createAgentSession, createAgentSessionFromServices, createAgentSessionServices,
+  DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
   type ExtensionCommandContextActions, type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import accountsExtension from "../src/index.ts";
@@ -38,6 +39,12 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
     modelsStorePath: join(dir, "models-store.json"), allowModelNetwork: false,
   });
   const settings = SettingsManager.inMemory();
+  const settingsPath = join(dir, "settings.json");
+  const saved = async () => JSON.parse(await readFile(settingsPath, "utf8"));
+  await writeFile(settingsPath, JSON.stringify({
+    defaultProvider: "openai-codex", defaultModel: runtime.getModels("openai-codex")[0].id,
+    theme: "light",
+  }));
   const loader = new DefaultResourceLoader({
     cwd: dir, agentDir: dir, settingsManager: settings,
     noExtensions: true, noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true,
@@ -86,6 +93,7 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   await session.prompt("/account work"); // declined consent
   assert.equal(session.model?.provider, "openai-codex");
   assert.equal(status, undefined);
+  assert.equal((await saved()).defaultProvider, "openai-codex");
   consent = true;
   let release!: () => void;
   idle = new Promise<void>((resolve) => { release = resolve; });
@@ -102,7 +110,35 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   assert.equal(idleCalls, idleBeforeSwitch + 2);
   assert.equal(dialogs.length, 0); // no model picker when the ID is available
   assert.equal(session.sessionManager.buildSessionContext().model?.provider, accountProviderId("work"));
-  assert.equal(settings.getDefaultProvider(), undefined); // no global active-account state
+  // A fresh CLI startup must use the explicit /account choice, even without another login.
+  const fresh = await createAgentSessionServices({
+    cwd: dir, agentDir: dir,
+    modelRuntime: await ModelRuntime.create({
+      credentials, modelsPath: join(dir, "models.json"),
+      modelsStorePath: join(dir, "models-store.json"), allowModelNetwork: false,
+    }),
+    resourceLoaderOptions: {
+      noExtensions: true, noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true,
+      extensionFactories: [accountsExtension],
+    },
+  });
+  const { session: next } = await createAgentSessionFromServices({
+    services: fresh, sessionManager: SessionManager.inMemory(dir), noTools: "all",
+  });
+  t.after(() => next.dispose());
+  assert.equal(next.model?.provider, accountProviderId("work"));
+  assert.equal(next.model?.id, nativeModel.id);
+  assert.deepEqual(await saved(), {
+    defaultProvider: accountProviderId("work"), defaultModel: nativeModel.id, theme: "light",
+  });
+  let nextStatus: string | undefined;
+  await next.bindExtensions({
+    mode: "tui", uiContext: {
+      ...ui, setStatus(_key, text) { nextStatus = text; },
+    } as ExtensionUIContext,
+    commandContextActions: { async waitForIdle() {} } as ExtensionCommandContextActions,
+  });
+  assert.equal(nextStatus, "account: work");
 
   // Authentication failure and failed model changes must not publish a new account.
   const authFailure = t.mock.method(runtime, "getAuth", async () => { throw new Error("secret-token"); });
@@ -123,6 +159,19 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   failedChange.mock.restore();
   assert.equal(status, "account: work");
   assert.equal(session.model?.provider, accountProviderId("work"));
+  assert.equal((await saved()).defaultProvider, accountProviderId("work"));
+
+  // A settings failure must not undo a successful switch or be reported as an auth failure.
+  const beforeFailure = await readFile(settingsPath, "utf8");
+  await writeFile(settingsPath, "secret-token invalid JSON");
+  await session.prompt("/account personal");
+  assert.equal(session.model?.provider, accountProviderId("personal"));
+  assert.equal(status, "account: personal");
+  assert.match(notifications.at(-1)!, /デフォルトを保存できません/);
+  assert(!notifications.join("\n").includes("secret-token"));
+  assert.equal(await readFile(settingsPath, "utf8"), "secret-token invalid JSON");
+  await writeFile(settingsPath, beforeFailure);
+  await session.prompt("/account work");
 
   choices.push(undefined);
   await session.prompt("/account"); // account picker cancelled
@@ -132,8 +181,17 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   choices.push(undefined);
   await session.prompt("/account personal"); // model picker cancelled
   assert.equal(session.model?.id, "not-in-account-catalog");
+  assert.equal((await saved()).defaultProvider, accountProviderId("work"));
   choices.push("personal", nativeModel.id);
   await session.prompt("/account");
+  assert.equal(session.model?.provider, accountProviderId("personal"));
+  assert.equal(status, "account: personal");
+  assert.equal((await saved()).defaultProvider, accountProviderId("personal"));
+  assert.equal(next.model?.provider, accountProviderId("work")); // No live following.
+  assert.equal(nextStatus, "account: work");
+  consent = false;
+  await next.prompt("/account work"); // Re-selecting the current account also saves it, without consent.
+  assert.equal((await saved()).defaultProvider, accountProviderId("work"));
   assert.equal(session.model?.provider, accountProviderId("personal"));
   assert.equal(status, "account: personal");
   await session.bindExtensions({ mode: "tui", uiContext: ui as ExtensionUIContext }); // session_start / reload display
@@ -144,7 +202,7 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   await loader.reload();
   const { session: resumed } = await createAgentSession({
     cwd: dir, agentDir: dir, resourceLoader: loader, modelRuntime: runtime,
-    noTools: "all", settingsManager: settings, sessionManager: session.sessionManager,
+    noTools: "all", settingsManager: SettingsManager.create(dir, dir), sessionManager: session.sessionManager,
   });
   t.after(() => resumed.dispose());
   await resumed.bindExtensions({ mode: "print" });

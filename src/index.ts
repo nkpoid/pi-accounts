@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readAccounts, updateAccounts, type Account } from "./accounts.ts";
 import { accountProviderId, createCodexAccountProvider } from "./codex.ts";
 import { registerLoginDefault } from "./login.ts";
@@ -133,17 +133,24 @@ export default async function (pi: ExtensionAPI) {
           promptLogin(ctx, provider);
           return;
         }
-        if (sameAccount) {
-          setStatus(ctx);
-          return;
-        }
-        await ctx.waitForIdle();
-        if (!await pi.setModel(model)) {
-          ctx.ui.notify(`切り替えできませんでした。/login ${provider} で再認証してください。`, "error");
-          return;
+        if (!sameAccount) {
+          await ctx.waitForIdle();
+          if (!await pi.setModel(model)) {
+            ctx.ui.notify(`切り替えできませんでした。/login ${provider} で再認証してください。`, "error");
+            return;
+          }
         }
         setStatus(ctx);
-        ctx.ui.notify(`account: ${account.id}`, "info");
+        try {
+          const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: false });
+          settings.setDefaultModelAndProvider(provider, model.id);
+          await settings.flush();
+          if (settings.drainErrors().length) throw new Error("Settings could not be saved");
+        } catch {
+          ctx.ui.notify(`account: ${account.id} を使用中ですが、新規セッションのデフォルトを保存できませんでした。/account ${account.id} で再試行してください。`, "warning");
+          return;
+        }
+        ctx.ui.notify(`account: ${account.id}（新規セッションのデフォルトに保存）`, "info");
       } catch {
         // Auth errors may contain server responses; never display credentials.
         ctx.ui.notify(provider
