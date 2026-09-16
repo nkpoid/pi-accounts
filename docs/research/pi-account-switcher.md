@@ -105,9 +105,10 @@ Pi セッション B → personal の provider/model
 
 native provider の認証処理と通信処理を再利用し、アカウント用の安定した ID とモデル一覧の provider ID を対応させる。
 通常の `/login <account-provider-id>` がその ID に credential を保存し、通常の認証解決が同じ ID の credential を更新する。[7] [14]
-ラベル変更では ID を変更しない。
 
-独自設定に保存するのは、安定 ID、表示名、元の provider の対応だけにする。
+独自設定に保存するのは、設定内で一意の `id` と元の `provider` だけにする。
+独立した `label` は持たず、一覧とステータスにも `id` を表示する。
+Pi が要求する provider の `name` は `id` から生成し、別の保存項目にはしない。
 パスは `getAgentDir()` 配下に置き、`~/.pi/agent` をハードコードしない。
 credential と active account の複製は持たない。
 
@@ -116,10 +117,10 @@ credential と active account の複製は持たない。
 新しい slash command は **`/account` 一つ**を基本にする。
 
 - `/account`：アカウント一覧から選択。
-- `/account work`：名前または ID で直接選択。
+- `/account work`：ID で直接選択。
 - 追加や削除が必要なら、同じメニュー内の操作にする。
 - ログイン、ログアウト、モデル選択は標準の `/login`、`/logout`、`/model` を利用。
-- 現在のアカウントは `ctx.model.provider` から表示する。
+- 現在のアカウントは `ctx.model.provider` から対応する `id` を表示する。
 
 標準の `/login` を `pi.sendUserMessage()` で実行できるとは仮定しない。
 組み込み interactive command は extension command と同じ dispatch 対象ではないため、初版では必要な `/login <id>` を案内する。[13]
