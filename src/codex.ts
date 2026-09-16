@@ -1,12 +1,13 @@
 import {
   lazyStream,
+  type Api,
   type AssistantMessageEvent,
   type Context,
   type Model,
   type Provider,
   type StreamOptions,
 } from "@earendil-works/pi-ai";
-import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 
 export function accountProviderId(id: string): string {
   return `pi-accounts-codex-${id}`;
@@ -32,10 +33,10 @@ function wireContext(context: Context, provider: string): Context {
 }
 
 function accountStream(
-  model: Model<"openai-codex-responses">,
+  model: Model<Api>,
   context: Context,
   options: StreamOptions | undefined,
-  run: Provider<"openai-codex-responses">["streamSimple"],
+  run: Provider["streamSimple"],
 ) {
   return lazyStream(model, async () => {
     const source = run({ ...model, provider: "openai-codex" }, wireContext(context, model.provider), {
@@ -57,8 +58,9 @@ function accountStream(
   });
 }
 
-export function createCodexAccountProvider(id: string): Provider<"openai-codex-responses"> {
-  const native = openaiCodexProvider();
+export function createCodexAccountProvider(id: string): Provider {
+  const native = builtinProviders().find((provider) => provider.id === "openai-codex");
+  if (!native?.auth.oauth) throw new Error("pi-accounts requires Pi's native Codex OAuth provider.");
   const provider = accountProviderId(id);
   return {
     id: provider,
