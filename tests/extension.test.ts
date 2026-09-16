@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -9,6 +9,7 @@ import {
   type ExtensionCommandContextActions, type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import accountsExtension from "../src/index.ts";
+import { readAccounts, updateAccounts } from "../src/accounts.ts";
 import { accountProviderId } from "../src/codex.ts";
 
 test("/account uses Pi model selection, consent, idle waiting, and session-derived status", async (t) => {
@@ -59,6 +60,8 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   let idleCalls = 0;
   const ui: Partial<ExtensionUIContext> = {
     setStatus(_key: string, text: string | undefined) { status = text; },
+    getEditorText() { return ""; },
+    setEditorText() {},
     notify(text: string) { notifications.push(text); },
     async select(title: string) { dialogs.push(title); return choices.shift(); },
     async confirm(_title: string, text: string) {
@@ -149,6 +152,9 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   const errors = t.mock.method(console, "error", () => {});
   await resumed.prompt("/account work");
   assert.equal(errors.mock.callCount(), 1);
+  await resumed.prompt("/account add noninteractive");
+  assert.equal(errors.mock.callCount(), 2);
+  assert.equal(runtime.getModel(accountProviderId("noninteractive"), nativeModel.id), undefined);
   assert.equal(resumed.model?.provider, accountProviderId("personal"));
   status = undefined;
   await resumed.bindExtensions({ mode: "tui", uiContext: ui as ExtensionUIContext });
@@ -157,4 +163,126 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   await resumed.prompt("/account personal");
   assert.match(notifications.at(-1)!, /\/login pi-accounts-codex-personal/);
   assert.equal(resumed.model?.provider, accountProviderId("personal")); // no fallback after logout
+});
+
+test("commands add accounts, prepare native login, switch, and safely remove without editing files or reloading", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-accounts-commands-"));
+  const previousDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  t.after(async () => {
+    if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousDir;
+    await rm(dir, { recursive: true, force: true });
+  });
+  t.mock.method(globalThis, "fetch", () => { throw new Error("Unexpected network access"); });
+  const credentials = new InMemoryCredentialStore();
+  await credentials.modify("openai-codex", async () => ({
+    type: "oauth", access: "native-synthetic", refresh: "synthetic", expires: Date.now() + 3_600_000,
+  }));
+  const runtime = await ModelRuntime.create({
+    credentials, modelsPath: join(dir, "models.json"),
+    modelsStorePath: join(dir, "models-store.json"), allowModelNetwork: false,
+  });
+  const settings = SettingsManager.inMemory();
+  const loader = new DefaultResourceLoader({
+    cwd: dir, agentDir: dir, settingsManager: settings,
+    noExtensions: true, noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true,
+    extensionFactories: [accountsExtension],
+  });
+  await loader.reload();
+  assert.deepEqual(loader.getExtensions().errors, []);
+  const nativeModel = runtime.getModels("openai-codex")[0];
+  const { session, extensionsResult } = await createAgentSession({
+    cwd: dir, agentDir: dir, resourceLoader: loader, modelRuntime: runtime,
+    model: nativeModel, noTools: "all", settingsManager: settings, sessionManager: SessionManager.inMemory(dir),
+  });
+  t.after(() => session.dispose());
+  let editor = "";
+  let status: string | undefined;
+  let consent = false;
+  const notifications: string[] = [];
+  const ui: Partial<ExtensionUIContext> = {
+    getEditorText() { return editor; },
+    setEditorText(text) { editor = text; },
+    setStatus(_key, text) { status = text; },
+    notify(text) { notifications.push(text); },
+    async confirm() { return consent; },
+  };
+  await session.bindExtensions({
+    mode: "tui", uiContext: ui as ExtensionUIContext,
+    commandContextActions: { async waitForIdle() {} } as ExtensionCommandContextActions,
+  });
+  const path = join(dir, "accounts.json");
+  await session.prompt("/account");
+  assert.match(notifications.at(-1)!, /\/account add/);
+  await session.prompt("/account add ../invalid");
+  assert.match(notifications.at(-1)!, /更新できません/);
+  assert.deepEqual(await readAccounts(path), []);
+  assert.equal(editor, "");
+  await mkdir(`${path}.lock`);
+  await session.prompt("/account add locked");
+  assert.match(notifications.at(-1)!, /更新できません/);
+  assert.equal(runtime.getModel(accountProviderId("locked"), nativeModel.id), undefined);
+  assert.deepEqual(await readAccounts(path), []);
+  await rm(`${path}.lock`, { recursive: true });
+  await session.prompt("/account add work");
+  assert.equal(editor, "/login pi-accounts-codex-work");
+  assert.deepEqual(await readAccounts(path), [{ id: "work", provider: "openai-codex" }]);
+  assert(runtime.getModel(accountProviderId("work"), nativeModel.id));
+  assert.equal(session.model?.provider, "openai-codex"); // Adding does not send the conversation elsewhere.
+  assert.equal(session.state.messages.length, 0); // Built-in /login must never be sent as an LLM prompt.
+  await session.prompt("/account add work");
+  assert.match(notifications.at(-1)!, /登録済み/);
+  const command = extensionsResult.extensions[0].commands.get("account")!;
+  assert.deepEqual(await command.getArgumentCompletions!("remove w"), [{ value: "remove work", label: "remove work" }]);
+
+  editor = "unfinished draft";
+  await session.prompt("/account work"); // Login guidance does not overwrite drafts.
+  assert.equal(editor, "unfinished draft");
+  editor = "";
+  await session.prompt("/account work");
+  assert.equal(editor, "/login pi-accounts-codex-work");
+
+  // Simulate Pi's built-in login using synthetic credentials, not an external OAuth flow.
+  const provider = runtime.getProvider(accountProviderId("work"))!;
+  runtime.registerNativeProvider({ ...provider, auth: { oauth: {
+    ...provider.auth.oauth!,
+    async login() { return { type: "oauth", access: "synthetic", refresh: "synthetic", expires: Date.now() + 3_600_000 }; },
+  } } });
+  await runtime.login(provider.id, "oauth", { async prompt() { return ""; }, notify() {} });
+  await session.prompt("/account work"); // No consent yet.
+  assert.equal(session.model?.provider, "openai-codex");
+  consent = true;
+  await session.prompt("/account work");
+  assert.equal(session.model?.provider, provider.id);
+  assert.equal(status, "account: work");
+  await session.prompt("/account remove work");
+  assert.match(notifications.at(-1)!, /先に/);
+  await session.setModel(nativeModel);
+  await session.prompt("/account remove work");
+  assert.match(notifications.at(-1)!, /\/logout/);
+  await runtime.logout(provider.id);
+  consent = false;
+  await session.prompt("/account remove work");
+  assert.equal((await readAccounts(path)).length, 1);
+  consent = true;
+  await session.prompt("/account remove work");
+  assert.deepEqual(await readAccounts(path), []);
+  assert.equal(runtime.getModel(provider.id, nativeModel.id), undefined);
+  await session.prompt("/account remove missing");
+  assert.match(notifications.at(-1)!, /未登録/);
+
+  // Another session's additions survive; command words remain valid existing account names.
+  await updateAccounts(path, "add", "add");
+  await session.prompt("/account add personal");
+  assert.deepEqual((await readAccounts(path)).map((account) => account.id), ["add", "personal"]);
+  assert(runtime.getModel(accountProviderId("add"), nativeModel.id));
+  editor = "";
+  await session.prompt("/account add");
+  assert.equal(editor, "/login pi-accounts-codex-add");
+
+  await writeFile(path, "secret-token invalid JSON");
+  await session.prompt("/account add blocked");
+  assert.equal(runtime.getModel(accountProviderId("blocked"), nativeModel.id), undefined);
+  assert(!notifications.join("\n").includes("secret-token"));
 });

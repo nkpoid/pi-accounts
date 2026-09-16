@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 export type Account = { id: string; provider: "openai-codex" };
 
@@ -34,4 +35,26 @@ function validateAccounts(data: unknown, path: string): Account[] {
     ids.add(entry.id);
     return { id: entry.id, provider: entry.provider };
   });
+}
+
+export async function updateAccounts(path: string, action: "add" | "remove", id: string): Promise<Account[]> {
+  await mkdir(dirname(path), { recursive: true });
+  const lock = `${path}.lock`;
+  // ponytail: fail closed on contention/crash; add stale-lock recovery if needed.
+  await mkdir(lock);
+  try {
+    const accounts = await readAccounts(path);
+    const exists = accounts.some((account) => account.id === id);
+    if (action === "add" && exists) throw new Error("pi-accounts: 同じ名前のアカウントが登録済みです。");
+    if (action === "remove" && !exists) throw new Error("pi-accounts: 未登録のアカウントです。");
+    const next = validateAccounts(action === "add"
+      ? [...accounts, { id, provider: "openai-codex" }]
+      : accounts.filter((account) => account.id !== id), path);
+    const temporary = join(lock, "accounts.json");
+    await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    await rename(temporary, path);
+    return next;
+  } finally {
+    await rm(lock, { recursive: true, force: true });
+  }
 }
