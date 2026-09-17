@@ -26,16 +26,6 @@ export default async function (pi: ExtensionAPI) {
     if (ctx.mode === "tui" && !ctx.ui.getEditorText()) ctx.ui.setEditorText(command);
   }
 
-  function setStatus(ctx: ExtensionContext, provider = ctx.model?.provider) {
-    const account = accounts.find((entry) => accountProviderId(entry.id) === provider);
-    if (ctx.hasUI) ctx.ui.setStatus("pi-accounts", account ? `account: ${account.id}` : undefined);
-  }
-  pi.on("session_start", (_event, ctx) => setStatus(ctx));
-  pi.on("model_select", (event, ctx) => setStatus(ctx, event.model.provider));
-  pi.on("session_shutdown", (_event, ctx) => {
-    if (ctx.hasUI) ctx.ui.setStatus("pi-accounts", undefined);
-  });
-
   let switching = false;
   pi.registerCommand("account", {
     description: "Codex アカウントを切り替え。追加: /account add 名前、削除: /account remove 名前",
@@ -61,7 +51,6 @@ export default async function (pi: ExtensionAPI) {
       try {
         await ctx.waitForIdle();
         syncAccounts(await readAccounts(path));
-        setStatus(ctx);
         const management = args.trim().match(/^(add|remove)\s+(\S+)$/);
         if (management) {
           const action = management[1] === "add" ? "add" : "remove";
@@ -140,7 +129,6 @@ export default async function (pi: ExtensionAPI) {
             return;
           }
         }
-        setStatus(ctx);
         try {
           const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: false });
           settings.setDefaultModelAndProvider(provider, model.id);

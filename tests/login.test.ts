@@ -59,9 +59,8 @@ test("last successful Codex login becomes the persisted startup default, not a l
   });
   t.after(() => session.dispose());
   const notifications: string[] = [];
-  let status: string | undefined;
   const ui: Partial<ExtensionUIContext> = {
-    notify(text) { notifications.push(text); }, setStatus(_key, text) { status = text; },
+    notify(text) { notifications.push(text); },
   };
   const originalLogin = runtime.login;
   await session.bindExtensions({ mode: "tui", uiContext: ui as ExtensionUIContext });
@@ -78,7 +77,6 @@ test("last successful Codex login becomes the persisted startup default, not a l
   });
   assert.equal(session.model?.provider, "openai-codex");
   assert.equal(session.model?.id, nativeModel.id);
-  assert.equal(status, undefined);
 
   // The same startup services as the CLI load the saved choice before model selection.
   const fresh = await services();
@@ -89,7 +87,6 @@ test("last successful Codex login becomes the persisted startup default, not a l
   await next.bindExtensions({ mode: "tui", uiContext: ui as ExtensionUIContext });
   assert.equal(next.model?.provider, work);
   assert.equal(next.model?.id, defaultModel);
-  assert.equal(status, "account: work");
   next.sessionManager.appendMessage({ role: "user", content: "Existing conversation", timestamp: 0 });
 
   await login(personal);

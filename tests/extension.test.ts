@@ -13,7 +13,7 @@ import accountsExtension from "../src/index.ts";
 import { readAccounts, updateAccounts } from "../src/accounts.ts";
 import { accountProviderId } from "../src/codex.ts";
 
-test("/account uses Pi model selection, consent, idle waiting, and session-derived status", async (t) => {
+test("/account persists model selection with consent and idle waiting, without an extra footer", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "pi-accounts-extension-"));
   const previousDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
@@ -58,7 +58,7 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
     model: nativeModel, noTools: "all", settingsManager: settings, sessionManager: SessionManager.inMemory(dir),
   });
   t.after(() => session.dispose());
-  let status: string | undefined;
+  const statusUpdates: (string | undefined)[] = [];
   const notifications: string[] = [];
   const choices: (string | undefined)[] = [];
   const dialogs: string[] = [];
@@ -66,7 +66,7 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   let idle = Promise.resolve();
   let idleCalls = 0;
   const ui: Partial<ExtensionUIContext> = {
-    setStatus(_key: string, text: string | undefined) { status = text; },
+    setStatus(_key, text) { statusUpdates.push(text); },
     getEditorText() { return ""; },
     setEditorText() {},
     notify(text: string) { notifications.push(text); },
@@ -80,7 +80,6 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
     mode: "tui", uiContext: ui as ExtensionUIContext,
     commandContextActions: { async waitForIdle() { idleCalls++; await idle; } } as ExtensionCommandContextActions,
   });
-  assert.equal(status, undefined);
   assert(runtime.getModel(accountProviderId("work"), nativeModel.id));
   const command = extensionsResult.extensions[0].commands.get("account")!;
   assert.deepEqual(await command.getArgumentCompletions!("w"), [{ value: "work", label: "work" }]);
@@ -92,7 +91,6 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   assert.match(notifications.at(-1)!, /\/login pi-accounts-codex-unconfigured/);
   await session.prompt("/account work"); // declined consent
   assert.equal(session.model?.provider, "openai-codex");
-  assert.equal(status, undefined);
   assert.equal((await saved()).defaultProvider, "openai-codex");
   consent = true;
   let release!: () => void;
@@ -106,7 +104,6 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   await switching;
   assert.equal(session.model?.provider, accountProviderId("work"));
   assert.equal(session.model?.id, nativeModel.id);
-  assert.equal(status, "account: work");
   assert.equal(idleCalls, idleBeforeSwitch + 2);
   assert.equal(dialogs.length, 0); // no model picker when the ID is available
   assert.equal(session.sessionManager.buildSessionContext().model?.provider, accountProviderId("work"));
@@ -131,33 +128,26 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   assert.deepEqual(await saved(), {
     defaultProvider: accountProviderId("work"), defaultModel: nativeModel.id, theme: "light",
   });
-  let nextStatus: string | undefined;
   await next.bindExtensions({
-    mode: "tui", uiContext: {
-      ...ui, setStatus(_key, text) { nextStatus = text; },
-    } as ExtensionUIContext,
+    mode: "tui", uiContext: ui as ExtensionUIContext,
     commandContextActions: { async waitForIdle() {} } as ExtensionCommandContextActions,
   });
-  assert.equal(nextStatus, "account: work");
 
   // Authentication failure and failed model changes must not publish a new account.
   const authFailure = t.mock.method(runtime, "getAuth", async () => { throw new Error("secret-token"); });
   await session.prompt("/account personal");
   authFailure.mock.restore();
   assert.equal(session.model?.provider, accountProviderId("work"));
-  assert.equal(status, "account: work");
   assert.match(notifications.at(-1)!, /\/login pi-accounts-codex-personal/);
   assert(!notifications.join("\n").includes("secret-token"));
   const unavailable = t.mock.method(runtime, "hasConfiguredAuth", () => false);
   await session.prompt("/account personal");
   unavailable.mock.restore();
   assert.match(notifications.at(-1)!, /切り替えできませんでした/);
-  assert.equal(status, "account: work");
   assert.equal(session.model?.provider, accountProviderId("work"));
   const failedChange = t.mock.method(session, "setModel", async () => { throw new Error("Failed change"); });
   await session.prompt("/account personal");
   failedChange.mock.restore();
-  assert.equal(status, "account: work");
   assert.equal(session.model?.provider, accountProviderId("work"));
   assert.equal((await saved()).defaultProvider, accountProviderId("work"));
 
@@ -166,7 +156,6 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   await writeFile(settingsPath, "secret-token invalid JSON");
   await session.prompt("/account personal");
   assert.equal(session.model?.provider, accountProviderId("personal"));
-  assert.equal(status, "account: personal");
   assert.match(notifications.at(-1)!, /デフォルトを保存できません/);
   assert(!notifications.join("\n").includes("secret-token"));
   assert.equal(await readFile(settingsPath, "utf8"), "secret-token invalid JSON");
@@ -175,9 +164,8 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
 
   choices.push(undefined);
   await session.prompt("/account"); // account picker cancelled
-  assert.equal(status, "account: work");
+  assert.equal(session.model?.provider, accountProviderId("work"));
   await session.setModel({ ...nativeModel, id: "not-in-account-catalog" });
-  assert.equal(status, undefined); // standard /model changes clear the account footer
   choices.push(undefined);
   await session.prompt("/account personal"); // model picker cancelled
   assert.equal(session.model?.id, "not-in-account-catalog");
@@ -185,17 +173,13 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   choices.push("personal", nativeModel.id);
   await session.prompt("/account");
   assert.equal(session.model?.provider, accountProviderId("personal"));
-  assert.equal(status, "account: personal");
   assert.equal((await saved()).defaultProvider, accountProviderId("personal"));
   assert.equal(next.model?.provider, accountProviderId("work")); // No live following.
-  assert.equal(nextStatus, "account: work");
   consent = false;
   await next.prompt("/account work"); // Re-selecting the current account also saves it, without consent.
   assert.equal((await saved()).defaultProvider, accountProviderId("work"));
   assert.equal(session.model?.provider, accountProviderId("personal"));
-  assert.equal(status, "account: personal");
-  await session.bindExtensions({ mode: "tui", uiContext: ui as ExtensionUIContext }); // session_start / reload display
-  assert.equal(status, "account: personal");
+  await session.bindExtensions({ mode: "tui", uiContext: ui as ExtensionUIContext }); // session_start / reload
 
   session.sessionManager.appendMessage({ role: "user", content: "Stored conversation", timestamp: 0 });
   session.dispose();
@@ -214,13 +198,13 @@ test("/account uses Pi model selection, consent, idle waiting, and session-deriv
   assert.equal(errors.mock.callCount(), 2);
   assert.equal(runtime.getModel(accountProviderId("noninteractive"), nativeModel.id), undefined);
   assert.equal(resumed.model?.provider, accountProviderId("personal"));
-  status = undefined;
   await resumed.bindExtensions({ mode: "tui", uiContext: ui as ExtensionUIContext });
-  assert.equal(status, "account: personal");
   await runtime.logout(accountProviderId("personal"));
   await resumed.prompt("/account personal");
   assert.match(notifications.at(-1)!, /\/login pi-accounts-codex-personal/);
   assert.equal(resumed.model?.provider, accountProviderId("personal")); // no fallback after logout
+  await resumed.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+  assert.deepEqual(statusUpdates, []); // Startup, selection, reload, resume, and shutdown add no footer status.
 });
 
 test("commands add accounts, prepare native login, switch, and safely remove without editing files or reloading", async (t) => {
@@ -256,13 +240,11 @@ test("commands add accounts, prepare native login, switch, and safely remove wit
   });
   t.after(() => session.dispose());
   let editor = "";
-  let status: string | undefined;
   let consent = false;
   const notifications: string[] = [];
   const ui: Partial<ExtensionUIContext> = {
     getEditorText() { return editor; },
     setEditorText(text) { editor = text; },
-    setStatus(_key, text) { status = text; },
     notify(text) { notifications.push(text); },
     async confirm() { return consent; },
   };
@@ -313,7 +295,6 @@ test("commands add accounts, prepare native login, switch, and safely remove wit
   consent = true;
   await session.prompt("/account work");
   assert.equal(session.model?.provider, provider.id);
-  assert.equal(status, "account: work");
   await session.prompt("/account remove work");
   assert.match(notifications.at(-1)!, /先に/);
   await session.setModel(nativeModel);
